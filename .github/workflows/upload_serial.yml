@@ -57,7 +57,7 @@ jobs:
       - name: Run Serial Downloader & Telegram Publisher
         env:
           API_ID: ${{ secrets.API_ID }}
-          API_HASH: ${{ secrets.API_HASH }}
+          API_HASH: ${{ secrets.API_HASH || secrets.APT_HASH }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           MONGO_URI: ${{ secrets.MONGO_URI }}
           PAYLOAD_JSON: ${{ toJson(github.event.client_payload) }}
