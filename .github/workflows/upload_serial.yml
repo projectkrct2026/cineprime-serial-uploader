@@ -1,38 +1,39 @@
-name: CinePrime Serial Uploader
+name: CinePrime 24/7 Autonomous Serial Uploader
 
 on:
+  schedule:
+    - cron: '*/20 * * * *'  # Fully automated: Runs every 20 minutes 24/7
   repository_dispatch:
     types: [upload_serial]
   workflow_dispatch:
     inputs:
       url:
-        description: "TamilDhool Episode URL"
-        required: true
+        description: "Specific Episode URL (Leave blank for full auto scan)"
+        required: false
       serial_name:
-        description: "Serial Name (e.g. Kayal)"
-        required: true
-        default: "Kayal"
+        description: "Serial Name (optional for manual)"
+        required: false
       date:
         description: "Date (DD-MM-YYYY)"
-        required: true
-        default: "20-10-2026"
+        required: false
       network:
         description: "Network (SUN, VIJAY, ZEE)"
-        required: true
-        default: "SUN"
+        required: false
       target_channel:
         description: "Target Telegram Channel ID"
-        required: true
-        default: "-1003853458965"
+        required: false
       day_label:
         description: "Day Label (Day 1 or Day 2)"
-        required: true
-        default: "Day 2"
+        required: false
+
+concurrency:
+  group: serial-uploader-runner
+  cancel-in-progress: false
 
 jobs:
   upload_serial:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
 
     steps:
       - name: Checkout Repository
@@ -52,9 +53,9 @@ jobs:
       - name: Install Python Dependencies
         run: |
           pip install --upgrade pip
-          pip install pyrogram tgcrypto yt-dlp curl_cffi beautifulsoup4 motor aiohttp
+          pip install -r requirements.txt
 
-      - name: Run Serial Downloader & Telegram Publisher
+      - name: Run Autonomous Serial Pipeline
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH || secrets.APT_HASH }}
