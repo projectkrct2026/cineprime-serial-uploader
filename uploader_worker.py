@@ -4,6 +4,7 @@ CinePrime Fully Autonomous Serial Uploader (GitHub Actions 10 Gbps Runner)
 ========================================================================
 - Runs 24/7 on GitHub Cloud Runners (10 Gbps unmetered network)
 - 100% Free - Consumes 0 MB of AWS EC2 Bandwidth
+- Real-Time Telegram Progress Bar (Download [██████░░░░] -> Upload [██████████])
 - Dual Operational Modes:
     1. Single Mode: Dispatched instantly by EC2 bot via webhook when a new serial is found.
     2. Auto Mode: Triggered automatically every 20 minutes by GitHub cron to scrape Sun TV,
@@ -30,6 +31,8 @@ from bs4 import BeautifulSoup
 from curl_cffi import requests
 from motor.motor_asyncio import AsyncIOMotorClient
 from pyrogram import Client
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.errors import FloodWait, MessageNotModified
 import pyrogram.utils
 
 # Pyrogram 64-bit Channel ID support
@@ -43,6 +46,8 @@ API_ID = int(os.getenv("API_ID", "36869346"))
 API_HASH = os.getenv("API_HASH") or os.getenv("APT_HASH") or "9abc474ef05c5e46b2210b02eb4c81fc"
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8654460032:AAF51fHYkqf1HE7FV8obL8X7aFvH7hbgj0I")
 MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://firee4531_db_user:firee_2006@cluster0.n2iizcz.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "1391692876"))
+LEECH_GROUP_ID = int(os.getenv("LEECH_GROUP_ID", "-1001978437651"))
 
 DEFAULT_BRAND = "@CinePrimeHub"
 MAIN_SERIALS_USERNAME = "@cine_serials"
@@ -84,12 +89,165 @@ def get_current_rotation(dt=None):
     chans = CHANNELS_DAY1 if is_day_1 else CHANNELS_DAY2
     return label, chans
 
-def format_size(size_bytes):
-    if not size_bytes or size_bytes <= 0: return "0 MB"
-    mb = size_bytes / (1024 * 1024)
+def format_size(bytes_val):
+    if not bytes_val or bytes_val <= 0: return "0.0 MB"
+    mb = bytes_val / (1024 * 1024)
     if mb >= 1024:
         return f"{mb / 1024:.2f} GB"
     return f"{mb:.1f} MB"
+
+def format_speed(speed_bps):
+    if not speed_bps or speed_bps <= 0: return "0 KB/s"
+    mbps = speed_bps / (1024 * 1024)
+    if mbps >= 1.0:
+        return f"{mbps:.1f} MB/s"
+    return f"{speed_bps / 1024:.0f} KB/s"
+
+def format_eta(seconds):
+    if not seconds or seconds <= 0: return "--"
+    m = int(seconds) // 60
+    s = int(seconds) % 60
+    if m > 0:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+def make_progress_bar(current, total, length=10):
+    pct = max(0.0, min(1.0, current / total)) if total > 0 else 0.0
+    filled = int(round(length * pct))
+    bar = "█" * filled + "░" * (length - filled)
+    return bar, f"{pct * 100:.1f}%"
+
+class TelegramLiveReporter:
+    def __init__(self, client: Client, chat_id: int, loop):
+        self.client = client
+        self.chat_id = chat_id
+        self.loop = loop
+        self.status_msg = None
+        self.last_update = 0.0
+        self.update_interval = 4.0  # 4 seconds protects against Telegram FloodWait
+        self.task_name = ""
+        self.network = ""
+        self.date = ""
+        self.target_channel = 0
+        self.day_label = ""
+        self.stage = "Initializing"
+        self.start_time = time.time()
+
+    async def init_message(self, task_name, network, date, target_channel, day_label):
+        self.task_name = task_name
+        self.network = network
+        self.date = date
+        self.target_channel = target_channel
+        self.day_label = day_label
+        self.stage = "Starting Runner 🚀"
+        self.start_time = time.time()
+        
+        try:
+            text = self.render_card(0, 1, 0, 0, "Initializing Cloud Runner 🚀")
+            self.status_msg = await self.client.send_message(
+                chat_id=self.chat_id,
+                text=text,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📢 Main Serials Hub", url="https://t.me/cine_serials")
+                ]])
+            )
+        except Exception as e:
+            print(f"Notice creating status message: {e}")
+
+    def render_card(self, cur_b, tot_b, spd, eta, stage_label):
+        bar, pct_str = make_progress_bar(cur_b, tot_b)
+        elapsed = int(time.time() - self.start_time)
+        el_m, el_s = divmod(elapsed, 60)
+        elapsed_str = f"{el_m}m {el_s}s" if el_m else f"{el_s}s"
+        tag_name = f"@CinePrimeHub_{re.sub(r'[^a-zA-Z0-9_]', '_', self.task_name)}_{self.date}.mp4"
+
+        return (
+            f"**CinePrime Serials Bot**                                `720p HD`\n"
+            f"**Dharani** ➔ **{self.network} TV**\n"
+            f"`{tag_name}`\n"
+            f"📁 **Name:** `{self.task_name} ({self.date})`\n"
+            f"[{bar}] **{pct_str}**\n"
+            f"├ 🌀 **Process:** `{format_size(cur_b)} of {format_size(tot_b)}`\n"
+            f"├ ⏳ **Status:** `{stage_label}` | **ETA:** `{format_eta(eta)}`\n"
+            f"├ 📶 **Speed:** `{format_speed(spd)}` | **Elapsed:** `{elapsed_str}`\n"
+            f"├ ⚙️ **Engine:** `GitHub Cloud Runner (10 Gbps) • 0 MB EC2`\n"
+            f"├ 🏷️ **Mode:** `#SerialLeech` | `#{self.day_label.replace(' ', '')}Rotation`\n"
+            f"├ 📡 **Target:** `{self.network} TV ({self.day_label})` ➔ `{self.target_channel}`\n"
+            f"└ 👤 **User:** Dharani | **ID:** `1391692876`"
+        )
+
+    def on_download_progress(self, d):
+        if d.get('status') == 'downloading':
+            now = time.time()
+            if now - self.last_update < self.update_interval:
+                return
+            self.last_update = now
+
+            downloaded = d.get('downloaded_bytes') or 0
+            total = d.get('total_bytes') or d.get('total_bytes_estimate') or 1
+            speed = d.get('speed') or 0
+            eta = d.get('eta') or 0
+
+            text = self.render_card(downloaded, total, speed, eta, "Downloading (10 Gbps ⚡)")
+            self.schedule_edit(text)
+
+    async def update_stage(self, stage_name):
+        self.stage = stage_name
+        text = self.render_card(0, 1, 0, 0, stage_name)
+        await self.edit_text_safe(text)
+
+    async def on_upload_progress(self, current, total):
+        now = time.time()
+        if now - self.last_update < self.update_interval and current < total:
+            return
+        self.last_update = now
+
+        elapsed = max(1, time.time() - self.start_time)
+        speed = current / elapsed
+        eta = (total - current) / max(1, speed)
+
+        text = self.render_card(current, total, speed, eta, "Uploading to Telegram 📤")
+        await self.edit_text_safe(text)
+
+    async def complete_card(self, channel_name):
+        elapsed = int(time.time() - self.start_time)
+        el_m, el_s = divmod(elapsed, 60)
+        elapsed_str = f"{el_m}m {el_s}s" if el_m else f"{el_s}s"
+        bar = "██████████"
+        text = (
+            f"**CinePrime Serials Bot**                                `720p HD`\n"
+            f"**Dharani** ➔ **{self.network} TV**\n"
+            f"📁 **Name:** `{self.task_name} ({self.date})`\n"
+            f"[{bar}] **100.0%** ✅\n"
+            f"├ ⏳ **Status:** `Successfully Published!`\n"
+            f"├ ⏱️ **Total Time:** `{elapsed_str}`\n"
+            f"├ ⚙️ **Engine:** `GitHub Cloud Runner (10 Gbps) • 0 MB EC2`\n"
+            f"├ 📡 **Destination:** `{self.network} TV ({self.day_label})`\n"
+            f"└ 👤 **User:** Dharani | **ID:** `1391692876`\n\n"
+            f"✅ **Episode is live in channel and dump storage!**"
+        )
+        await self.edit_text_safe(text)
+
+    def schedule_edit(self, text):
+        if self.status_msg and self.loop:
+            asyncio.run_coroutine_threadsafe(self.edit_text_safe(text), self.loop)
+
+    async def edit_text_safe(self, text):
+        if not self.status_msg:
+            return
+        try:
+            await self.status_msg.edit_text(
+                text=text,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📢 Main Serials Hub", url="https://t.me/cine_serials")
+                ]])
+            )
+        except MessageNotModified:
+            pass
+        except FloodWait as fw:
+            await asyncio.sleep(fw.value)
+        except Exception as e:
+            print(f"Notice editing status message: {e}")
 
 def extract_episode_metadata(title: str, href: str):
     date_m = re.search(r'\b(\d{1,2}[-–./]\d{1,2}[-–./](?:20)?\d{2})\b', title) or re.search(r'\b(\d{1,2}[-–./]\d{1,2}[-–./](?:20)?\d{2})\b', href)
@@ -141,14 +299,16 @@ def extract_episode_metadata(title: str, href: str):
 def parse_input_payload():
     raw_payload = os.getenv("PAYLOAD_JSON")
     payload = {}
-    if raw_payload:
+    if raw_payload and raw_payload.strip() not in ["null", "None", ""]:
         try:
-            payload = json.loads(raw_payload)
+            parsed = json.loads(raw_payload)
+            if isinstance(parsed, dict):
+                payload = parsed
         except Exception as e:
             print(f"Notice parsing PAYLOAD_JSON: {e}")
 
     url = payload.get("url") or os.getenv("MANUAL_URL")
-    if not url:
+    if not url or url.strip() == "":
         return None  # Triggers Auto-Scrape Mode
 
     serial_name = payload.get("serial_name") or os.getenv("MANUAL_NAME") or "Serial"
@@ -160,16 +320,18 @@ def parse_input_payload():
     day_label = payload.get("day_label") or os.getenv("MANUAL_DAY") or label
     ep_tag = payload.get("ep_tag") or ""
     post_title = payload.get("post_title") or f"{serial_name} {date}"
+    status_chat_id = int(payload.get("status_chat_id") or os.getenv("STATUS_CHAT_ID") or ADMIN_USER_ID)
 
     return {
-        "url": url,
-        "serial_name": serial_name,
-        "date": date,
-        "network": network,
+        "url": url.strip(),
+        "serial_name": serial_name.strip(),
+        "date": date.strip(),
+        "network": network.strip().upper(),
         "target_channel": target_channel,
-        "day_label": day_label,
+        "day_label": day_label.strip(),
         "ep_tag": ep_tag,
-        "post_title": post_title
+        "post_title": post_title,
+        "status_chat_id": status_chat_id
     }
 
 def resolve_video_id_stream(vid_id: str):
@@ -245,7 +407,7 @@ def resolve_stream(episode_url: str):
         return None, None, str(e), None
     return None, None, "No video stream player found on page", None
 
-def download_video(video_url: str, output_path: str, referer: str = None):
+def download_video(video_url: str, output_path: str, referer: str = None, progress_hook=None):
     import yt_dlp
     from yt_dlp.networking.impersonate import ImpersonateTarget
 
@@ -256,6 +418,8 @@ def download_video(video_url: str, output_path: str, referer: str = None):
 
     hdrs = dict(HTTP_HEADERS)
     hdrs['Referer'] = stream_ref
+
+    hooks = [progress_hook] if progress_hook else []
 
     ydl_opts = {
         'format': 'best[height<=720]/bestvideo[height<=720]+bestaudio/best',
@@ -273,7 +437,8 @@ def download_video(video_url: str, output_path: str, referer: str = None):
         'no_warnings': True,
         'http_headers': hdrs,
         'referer': stream_ref,
-        'impersonate': ImpersonateTarget.from_str('chrome')
+        'impersonate': ImpersonateTarget.from_str('chrome'),
+        'progress_hooks': hooks
     }
 
     try:
@@ -360,12 +525,18 @@ def extract_metadata_and_thumb(video_path: str, thumb_out_path: str, poster_url:
     final_thumb = thumb_out_path if has_thumb else None
     return final_thumb, duration, width, height
 
-async def process_single_serial(app: Client, db, info: dict):
+async def process_single_serial(app: Client, db, info: dict, loop):
     url = info["url"]
     existing = await db["cph_serials_processed"].find_one({"_id": url})
     if existing:
         print(f"⏩ [Already Processed] {info['serial_name']} ({info['date']}) is already published. Skipping.")
         return True
+
+    status_chat = info.get("status_chat_id") or ADMIN_USER_ID
+    reporter = TelegramLiveReporter(app, status_chat, loop)
+    await reporter.init_message(
+        info["serial_name"], info["network"], info["date"], info["target_channel"], info["day_label"]
+    )
 
     print("\n" + "=" * 60)
     print(f"🎬 Processing:     {info['serial_name']}")
@@ -374,9 +545,11 @@ async def process_single_serial(app: Client, db, info: dict):
     print(f"🔗 Episode URL:    {url}")
     print("=" * 60)
 
+    await reporter.update_stage("Resolving Stream with Chrome TLS Impersonation 🔍")
     stream_url, parent_ref, method, poster_url = resolve_stream(url)
     if not stream_url:
         print(f"❌ Failed to resolve video stream: {method}")
+        await reporter.update_stage(f"Failed: Stream not found ({method}) ❌")
         return False
     print(f"✅ Stream resolved via {method}")
 
@@ -387,15 +560,18 @@ async def process_single_serial(app: Client, db, info: dict):
 
     try:
         print(f"📥 Downloading episode video (10 Gbps cloud network)...")
+        await reporter.update_stage("Downloading (10 Gbps Cloud Network ⚡)")
         t0 = time.time()
-        ok, dl_err = download_video(stream_url, video_path, referer=parent_ref)
+        ok, dl_err = download_video(stream_url, video_path, referer=parent_ref, progress_hook=reporter.on_download_progress)
         if not ok:
             print(f"❌ Download failed: {dl_err}")
+            await reporter.update_stage(f"Download Error: {dl_err} ❌")
             return False
         dl_sec = time.time() - t0
         print(f"✅ Downloaded in {dl_sec:.1f}s! ({format_size(os.path.getsize(video_path))})")
 
         print("🖼️ Preparing duration and 320x180 thumbnail...")
+        await reporter.update_stage("Generating 320x180 Poster Preview 🖼️")
         final_thumb, duration, width, height = extract_metadata_and_thumb(video_path, thumb_path, poster_url)
 
         ep_num_m = re.search(r'\b(?:EP|Episode|Day)\s*[-:]?\s*(\d+)\b', info["post_title"], re.IGNORECASE)
@@ -425,6 +601,7 @@ async def process_single_serial(app: Client, db, info: dict):
         )
 
         print(f"📤 Uploading to Telegram Target Channel ({info['target_channel']})...")
+        await reporter.update_stage("Uploading to Telegram 📤")
         sent = await app.send_video(
             chat_id=info["target_channel"],
             video=video_path,
@@ -433,7 +610,8 @@ async def process_single_serial(app: Client, db, info: dict):
             duration=duration,
             width=width,
             height=height,
-            supports_streaming=True
+            supports_streaming=True,
+            progress=reporter.on_upload_progress
         )
         msg_id = sent.id
         print(f"✅ Successfully posted to Channel! Message ID: {msg_id}")
@@ -453,11 +631,12 @@ async def process_single_serial(app: Client, db, info: dict):
             "uploaded_by": "github-actions-10gbps"
         })
         print(f"💾 Synced completion to MongoDB!")
+        await reporter.complete_card(f"{info['network']} TV ({info['day_label']})")
         return True
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
-async def run_autonomous_scan(app: Client, db):
+async def run_autonomous_scan(app: Client, db, loop):
     print("\n🔍 [24/7 Auto-Scan] Checking TamilDhool for new episodes...")
     label, chans = get_current_rotation()
     today_dt = datetime.now(IST).date()
@@ -482,7 +661,6 @@ async def run_autonomous_scan(app: Client, db):
                 if not s_name or not s_date:
                     continue
                 
-                # Check date match (today or yesterday)
                 try:
                     d_obj = datetime.strptime(s_date, "%d-%m-%Y").date()
                     if abs((today_dt - d_obj).days) > 1:
@@ -500,7 +678,8 @@ async def run_autonomous_scan(app: Client, db):
                     "target_channel": target_chan,
                     "day_label": label,
                     "ep_tag": s_tag,
-                    "post_title": f"{s_name} {s_date}"
+                    "post_title": f"{s_name} {s_date}",
+                    "status_chat_id": ADMIN_USER_ID
                 })
         except Exception as e:
             print(f"Notice scanning {net}: {e}")
@@ -509,7 +688,7 @@ async def run_autonomous_scan(app: Client, db):
     
     uploaded_count = 0
     for ep in all_episodes:
-        ok = await process_single_serial(app, db, ep)
+        ok = await process_single_serial(app, db, ep, loop)
         if ok:
             uploaded_count += 1
 
@@ -523,14 +702,15 @@ async def main():
 
     app = Client("github_serial_uploader", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
     await app.start()
+    loop = asyncio.get_running_loop()
 
     try:
         if single_info:
             print("🚀 Executing Single Episode Upload (Dispatched from EC2/Manual)...")
-            await process_single_serial(app, db, single_info)
+            await process_single_serial(app, db, single_info, loop)
         else:
             print("🤖 Executing Full Autonomous 24/7 Scan & Upload...")
-            await run_autonomous_scan(app, db)
+            await run_autonomous_scan(app, db, loop)
     finally:
         await app.stop()
 
