@@ -68,11 +68,62 @@ CHANNELS_DAY2 = {
     "ZEE": -1004487133721
 }
 
+BASE_URL = "https://www.tamildhool.tech"
+
 CATEGORY_PAGES = [
-    ("SUN", "https://tamildhool.tech/sun-tv/"),
-    ("VIJAY", "https://tamildhool.tech/star-vijay/"),
-    ("ZEE", "https://tamildhool.tech/zee-tamil/")
+    ("ALL", f"{BASE_URL}/"),
+    ("ALL", f"{BASE_URL}/page/2/"),
+    ("ALL", f"{BASE_URL}/page/3/"),
+    ("ALL", f"{BASE_URL}/page/4/"),
+    ("SUN", f"{BASE_URL}/sun-tv/sun-tv-serial/"),
+    ("SUN", f"{BASE_URL}/sun-tv/sun-tv-serial/page/2/"),
+    ("SUN", f"{BASE_URL}/sun-tv/sun-tv-show/"),
+    ("VIJAY", f"{BASE_URL}/vijay-tv/vijay-tv-serial/"),
+    ("VIJAY", f"{BASE_URL}/vijay-tv/vijay-tv-serial/page/2/"),
+    ("VIJAY", f"{BASE_URL}/vijay-tv/vijay-tv-show/"),
+    ("VIJAY", f"{BASE_URL}/vijay-tv/vijay-tv-show/bigg-boss-tamil-season-10/"),
+    ("ZEE", f"{BASE_URL}/zee-tamil/zee-tamil-serial/"),
+    ("ZEE", f"{BASE_URL}/zee-tamil/zee-tamil-serial/page/2/"),
+    ("ZEE", f"{BASE_URL}/zee-tamil/zee-tamil-show/")
 ]
+
+SERIAL_NETWORK_MAP = {
+    "SUN": [
+        r'kayal', r'singapennae', r'singa\s*penne', r'vanathai\s*pola',
+        r'ethirneechal', r'etheer\s*neechal', r'marumagal', r'malligai', r'inbha',
+        r'mullum\s*malarum', r'anbe\s*vaa', r'sundari', r'mr\s*manaivi', r'poova\s*thalaya',
+        r'lakshmi', r'sevvanthi', r'priyadharsini', r'parijatham', r'annam'
+    ],
+    "VIJAY": [
+        r'siragadikka\s*aasai', r'pandian\s*stores', r'baakiyalakshmi', r'mahanadhi',
+        r'azhagae\s*azhagu', r'chinna\s*marumagal', r'ayyanar\s*thunai',
+        r'onna\s*irukka\s*kaththukanum', r'thaai\s*maaman', r'thendrale\s*mella\s*pesu',
+        r'kana\s*kandenadi', r'kanmani\s*anbudan', r'kadhal\s*kadhal\s*kadhal',
+        r'suttum\s*vizhi\s*sudare', r'sindhu\s*bairavi', r'bigg\s*boss', r'super\s*singer',
+        r'cooku\s*with\s*comali', r'kpy', r'kadhala\s*kadhala'
+    ],
+    "ZEE": [
+        r'vaagai\s*sooda\s*vaa', r'karthigai\s*deepam', r'anna', r'sandakozhi', r'meenakshi\s*ponnunga',
+        r'idhayam', r'maari', r'samanthi', r'varisu', r'paarijatham',
+        r'vishwa\s*roopam', r'nalave\s*aayiram\s*kanna', r'thirumathi\s*hitler',
+        r'chithiram\s*pesuthadi', r'ninaithale\s*inikkum', r'ayali'
+    ]
+}
+
+def detect_network_from_text(text: str) -> str:
+    t = text.lower()
+    if "sun tv" in t or "sun-tv" in t or "suntv" in t:
+        return "SUN"
+    if "vijay tv" in t or "vijay-tv" in t or "vijaytv" in t or "star vijay" in t:
+        return "VIJAY"
+    if "zee tamil" in t or "zee-tamil" in t or "zeetamil" in t or "zee tv" in t:
+        return "ZEE"
+
+    for net, patterns in SERIAL_NETWORK_MAP.items():
+        for pat in patterns:
+            if re.search(r'\b' + pat + r'\b', t):
+                return net
+    return None
 
 HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -685,16 +736,28 @@ async def process_single_serial(app: Client, db, info: dict, loop):
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
-async def run_autonomous_scan(app: Client, db, loop, network_filter: str = None):
+async def run_autonomous_scan(app: Client, db, loop, network_filter: str = None, target_date_str: str = None):
     print("\n🔍 [24/7 Auto-Scan] Checking TamilDhool for new episodes...")
     label, chans = get_current_rotation()
-    today_dt = datetime.now(IST).date()
-    all_episodes = []
-    seen = set()
+
+    # STRICT TODAY-ONLY FILTER
+    if target_date_str and target_date_str.strip():
+        try:
+            target_dt = datetime.strptime(target_date_str.strip(), "%d-%m-%Y").date()
+        except Exception:
+            target_dt = datetime.now(IST).date()
+    else:
+        target_dt = datetime.now(IST).date()
+
+    today_str = target_dt.strftime("%d-%m-%Y")
+    print(f"📅 STRICT Target Date: {today_str} (Older/yesterday episodes will be 100% SKIPPED)")
 
     pages = CATEGORY_PAGES
     if network_filter and network_filter.upper() in ["SUN", "VIJAY", "ZEE"]:
-        pages = [p for p in CATEGORY_PAGES if p[0] == network_filter.upper()]
+        pages = [p for p in CATEGORY_PAGES if p[0] in [network_filter.upper(), "ALL"]]
+
+    all_episodes = []
+    seen = set()
 
     for net, cat_url in pages:
         try:
@@ -709,25 +772,36 @@ async def run_autonomous_scan(app: Client, db, loop, network_filter: str = None)
                     continue
                 if any(x in href.lower() for x in ["/page/", "/category/", "/tag/", "promo"]):
                     continue
-                
+
                 s_name, s_date, s_tag = extract_episode_metadata(title, href)
                 if not s_name or not s_date:
                     continue
-                
+
+                # STRICT TODAY-ONLY:
+                # Must EXACTLY match target date (e.g. 21-10-2026). Reject 20-10-2026 or any previous dates!
                 try:
                     d_obj = datetime.strptime(s_date, "%d-%m-%Y").date()
-                    if abs((today_dt - d_obj).days) > 1:
+                    if d_obj != target_dt:
                         continue
                 except Exception:
                     continue
 
+                # Detect network from serial title, URL, or page category
+                ep_net = detect_network_from_text(f"{title} {href}")
+                if not ep_net and net != "ALL":
+                    ep_net = net
+                if not ep_net:
+                    continue
+                if network_filter and ep_net != network_filter.upper():
+                    continue
+
                 seen.add(href)
-                target_chan = chans.get(net, chans["SUN"])
+                target_chan = chans.get(ep_net, chans["SUN"])
                 all_episodes.append({
                     "url": href,
                     "serial_name": s_name,
                     "date": s_date,
-                    "network": net,
+                    "network": ep_net,
                     "target_channel": target_chan,
                     "day_label": label,
                     "ep_tag": s_tag,
@@ -735,9 +809,9 @@ async def run_autonomous_scan(app: Client, db, loop, network_filter: str = None)
                     "status_chat_id": ADMIN_USER_ID
                 })
         except Exception as e:
-            print(f"Notice scanning {net}: {e}")
+            print(f"Notice scanning {cat_url}: {e}")
 
-    print(f"📊 Discovered {len(all_episodes)} total recent episodes across scanned categories.")
+    print(f"📊 Discovered {len(all_episodes)} total valid episodes for {today_str} across Sun, Vijay & Zee.")
 
     # Deduplicate against MongoDB to find only pending episodes
     unprocessed = []
@@ -796,8 +870,9 @@ async def main():
             await process_single_serial(app, db, single_info, loop)
         else:
             net_filter = os.getenv("MANUAL_NET")
-            print(f"🤖 Executing Parallel 10 Autonomous Scan & Upload (Filter: {net_filter or 'ALL'})...")
-            await run_autonomous_scan(app, db, loop, network_filter=net_filter)
+            date_filter = os.getenv("MANUAL_DATE")
+            print(f"🤖 Executing Parallel 10 Autonomous Scan & Upload (Filter: {net_filter or 'ALL'}, Date: {date_filter or 'TODAY'})...")
+            await run_autonomous_scan(app, db, loop, network_filter=net_filter, target_date_str=date_filter)
     finally:
         await app.stop()
 
