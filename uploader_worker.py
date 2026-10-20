@@ -246,6 +246,12 @@ class TelegramLiveReporter:
             f"✅ **Episode is live in channel and dump storage!**"
         )
         await self.edit_text_safe(text)
+        await asyncio.sleep(12)
+        try:
+            if self.status_msg:
+                await self.status_msg.delete()
+        except Exception:
+            pass
 
     def schedule_edit(self, text):
         if self.status_msg and self.loop:
@@ -585,7 +591,7 @@ async def process_single_serial(app: Client, db, info: dict, loop):
     print("=" * 60)
 
     await reporter.update_stage("Resolving Stream with Chrome TLS Impersonation 🔍")
-    stream_url, parent_ref, method, poster_url = resolve_stream(url)
+    stream_url, parent_ref, method, poster_url = await asyncio.to_thread(resolve_stream, url)
     if not stream_url:
         print(f"❌ Failed to resolve video stream: {method}")
         await reporter.update_stage(f"Failed: Stream not found ({method}) ❌")
@@ -744,16 +750,35 @@ async def run_autonomous_scan(app: Client, db, loop, network_filter: str = None)
         print("🎉 All serials are already published and up to date!")
         return
 
-    print(f"⚡ Launching PARALLEL 10 BATCH ({len(unprocessed)} episodes to process, 10 running simultaneously)...")
-    sem = asyncio.Semaphore(10)
+    print(f"⚡ Launching 10 CONTINUOUS PARALLEL WORKERS ({len(unprocessed)} episodes in queue)...")
+    queue = asyncio.Queue()
+    for ep in unprocessed:
+        await queue.put(ep)
 
-    async def bounded_worker(ep_info):
-        async with sem:
-            return await process_single_serial(app, db, ep_info, loop)
+    uploaded_count = 0
 
-    results = await asyncio.gather(*[bounded_worker(ep) for ep in unprocessed], return_exceptions=True)
-    uploaded_count = sum(1 for r in results if r is True)
-    print(f"\n🎉 [Batch Completed] Successfully uploaded {uploaded_count}/{len(unprocessed)} episodes in parallel 10 batch!")
+    async def slot_worker(worker_num):
+        nonlocal uploaded_count
+        while not queue.empty():
+            try:
+                ep_info = await queue.get()
+            except asyncio.QueueEmpty:
+                break
+
+            try:
+                print(f"🔄 [Slot #{worker_num}] Starting {ep_info['serial_name']} ({queue.qsize()} remaining in queue)...")
+                ok = await process_single_serial(app, db, ep_info, loop)
+                if ok:
+                    uploaded_count += 1
+            except Exception as w_err:
+                print(f"⚠️ [Slot #{worker_num}] Error on {ep_info.get('serial_name')}: {w_err}")
+            finally:
+                queue.task_done()
+
+    num_workers = min(10, len(unprocessed))
+    worker_tasks = [asyncio.create_task(slot_worker(i + 1)) for i in range(num_workers)]
+    await asyncio.gather(*worker_tasks)
+    print(f"\n🎉 [Continuous Pipeline Completed] Successfully uploaded {uploaded_count}/{len(unprocessed)} episodes!")
 
 async def main():
     single_info = parse_input_payload()
