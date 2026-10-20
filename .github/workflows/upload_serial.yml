@@ -1,0 +1,71 @@
+name: CinePrime Serial Uploader
+
+on:
+  repository_dispatch:
+    types: [upload_serial]
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "TamilDhool Episode URL"
+        required: true
+      serial_name:
+        description: "Serial Name (e.g. Kayal)"
+        required: true
+        default: "Kayal"
+      date:
+        description: "Date (DD-MM-YYYY)"
+        required: true
+        default: "20-10-2026"
+      network:
+        description: "Network (SUN, VIJAY, ZEE)"
+        required: true
+        default: "SUN"
+      target_channel:
+        description: "Target Telegram Channel ID"
+        required: true
+        default: "-1003853458965"
+      day_label:
+        description: "Day Label (Day 1 or Day 2)"
+        required: true
+        default: "Day 2"
+
+jobs:
+  upload_serial:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install System Dependencies (FFmpeg)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
+      - name: Install Python Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pyrogram tgcrypto yt-dlp curl_cffi beautifulsoup4 motor aiohttp
+
+      - name: Run Serial Downloader & Telegram Publisher
+        env:
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          PAYLOAD_JSON: ${{ toJson(github.event.client_payload) }}
+          MANUAL_URL: ${{ github.event.inputs.url }}
+          MANUAL_NAME: ${{ github.event.inputs.serial_name }}
+          MANUAL_DATE: ${{ github.event.inputs.date }}
+          MANUAL_NET: ${{ github.event.inputs.network }}
+          MANUAL_CHAN: ${{ github.event.inputs.target_channel }}
+          MANUAL_DAY: ${{ github.event.inputs.day_label }}
+        run: |
+          python uploader_worker.py
