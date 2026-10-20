@@ -33,7 +33,7 @@ concurrency:
 jobs:
   upload_serial:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 360
 
     steps:
       - name: Checkout Repository

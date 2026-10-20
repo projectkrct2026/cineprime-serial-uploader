@@ -183,10 +183,29 @@ class TelegramLiveReporter:
                 return
             self.last_update = now
 
-            downloaded = d.get('downloaded_bytes') or 0
-            total = d.get('total_bytes') or d.get('total_bytes_estimate') or 1
+            downloaded = d.get('downloaded_bytes')
+            total = d.get('total_bytes') or d.get('total_bytes_estimate')
             speed = d.get('speed') or 0
             eta = d.get('eta') or 0
+
+            # Handle HLS / chunk downloads where total_bytes is None
+            frag_idx = d.get('fragment_index')
+            frag_cnt = d.get('fragment_count')
+
+            if frag_cnt and frag_cnt > 0:
+                cur_frag = frag_idx or 0
+                if not downloaded:
+                    downloaded = int(cur_frag * 460 * 1024)
+                if not total:
+                    total = int(frag_cnt * 460 * 1024)
+                if not speed:
+                    elapsed = max(1.0, now - self.start_time)
+                    speed = downloaded / elapsed
+                if not eta and speed > 0:
+                    eta = max(0, (total - downloaded) / speed)
+
+            downloaded = downloaded or 0
+            total = total or 1
 
             text = self.render_card(downloaded, total, speed, eta, "Downloading (10 Gbps ⚡)")
             self.schedule_edit(text)
@@ -341,7 +360,7 @@ def resolve_video_id_stream(vid_id: str):
     try:
         r1 = requests.get(tt_url, headers=headers_tt, impersonate="chrome110", timeout=12)
         if r1.status_code == 200:
-            m_redir = re.search(r'url=([^\'\" >]+)', r1.text) or re.search(r'href=[\'\"](https?://[^\'\">]+video=[^\'\">]+)', r1.text)
+            m_redir = re.search(r'url=(https?://[^\'\" >]+)', r1.text) or re.search(r'href=[\'\"](https?://[^\'\">]+video=[^\'\">]+)', r1.text)
             if m_redir:
                 next_url = m_redir.group(1)
     except Exception as e:
@@ -357,12 +376,27 @@ def resolve_video_id_stream(vid_id: str):
             soup2 = BeautifulSoup(r2.text, "html.parser")
             for ifr2 in soup2.find_all("iframe"):
                 s2 = ifr2.get("src") or ifr2.get("data-src") or ""
+                if not s2: continue
                 if any(k in s2 for k in ["mediadelivery.net", "vimeo.com", "dailymotion.com", "streamwish", "filelions"]):
                     return s2, next_url
-            m_media = re.search(r'https?://player\.mediadelivery\.net/embed/[^\'\" >]+', r2.text)
+                if any(k in s2 for k in ["embed", "player", "pulselab"]):
+                    try:
+                        r3 = requests.get(s2, headers={"User-Agent": HTTP_HEADERS["User-Agent"], "Referer": next_url}, impersonate="chrome110", timeout=10)
+                        clean_r3 = r3.text.replace(r"\/", "/")
+                        m_m3u8 = re.search(r'(https?://[^\'\" >]+\.m3u8[^\'\" >]*)', clean_r3)
+                        if m_m3u8:
+                            return m_m3u8.group(1), s2
+                    except Exception as e3:
+                        print(f"Notice resolving embed player: {e3}")
+                    return s2, next_url
+
+            clean_r2 = r2.text.replace(r"\/", "/")
+            m_media = re.search(r'https?://player\.mediadelivery\.net/embed/[^\'\" >]+', clean_r2)
             if m_media: return m_media.group(0), next_url
-            m_vim = re.search(r'https?://player\.vimeo\.com/video/\d+(?:\?[^\'\"\s<>]+)?', r2.text)
+            m_vim = re.search(r'https?://player\.vimeo\.com/video/\d+(?:\?[^\'\"\s<>]+)?', clean_r2)
             if m_vim: return m_vim.group(0), next_url
+            m_m3u8_r2 = re.search(r'(https?://[^\'\" >]+\.m3u8[^\'\" >]*)', clean_r2)
+            if m_m3u8_r2: return m_m3u8_r2.group(1), next_url
     except Exception as e:
         print(f"Notice fetching embed page for {vid_id}: {e}")
     return None, None
@@ -402,6 +436,11 @@ def resolve_stream(episode_url: str):
                 if vm:
                     res, p_ref = resolve_video_id_stream(vm.group(1))
                     if res: return res, p_ref, "resolved_redirect", poster_url
+
+        clean_text = r.text.replace(r"\/", "/")
+        m_m3u8 = re.search(r'(https?://[^\'\" >]+\.m3u8[^\'\" >]*)', clean_text)
+        if m_m3u8:
+            return m_m3u8.group(1), episode_url, "html_direct_m3u8", poster_url
 
     except Exception as e:
         return None, None, str(e), None
