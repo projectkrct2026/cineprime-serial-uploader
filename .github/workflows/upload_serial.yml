@@ -17,8 +17,15 @@ on:
         description: "Date (DD-MM-YYYY)"
         required: false
       network:
-        description: "Network (SUN, VIJAY, ZEE)"
+        description: "Network Batch (SUN, VIJAY, ZEE, or ALL)"
         required: false
+        type: choice
+        options:
+          - ALL
+          - SUN
+          - VIJAY
+          - ZEE
+        default: ALL
       target_channel:
         description: "Target Telegram Channel ID"
         required: false

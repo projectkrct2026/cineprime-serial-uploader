@@ -601,7 +601,9 @@ async def process_single_serial(app: Client, db, info: dict, loop):
         print(f"📥 Downloading episode video (10 Gbps cloud network)...")
         await reporter.update_stage("Downloading (10 Gbps Cloud Network ⚡)")
         t0 = time.time()
-        ok, dl_err = download_video(stream_url, video_path, referer=parent_ref, progress_hook=reporter.on_download_progress)
+        ok, dl_err = await asyncio.to_thread(
+            download_video, stream_url, video_path, parent_ref, reporter.on_download_progress
+        )
         if not ok:
             print(f"❌ Download failed: {dl_err}")
             await reporter.update_stage(f"Download Error: {dl_err} ❌")
@@ -611,7 +613,9 @@ async def process_single_serial(app: Client, db, info: dict, loop):
 
         print("🖼️ Preparing duration and 320x180 thumbnail...")
         await reporter.update_stage("Generating 320x180 Poster Preview 🖼️")
-        final_thumb, duration, width, height = extract_metadata_and_thumb(video_path, thumb_path, poster_url)
+        final_thumb, duration, width, height = await asyncio.to_thread(
+            extract_metadata_and_thumb, video_path, thumb_path, poster_url
+        )
 
         ep_num_m = re.search(r'\b(?:EP|Episode|Day)\s*[-:]?\s*(\d+)\b', info["post_title"], re.IGNORECASE)
         ep_line = f"🎞️ **Episode:** Episode {ep_num_m.group(1)}\n" if ep_num_m else ""
@@ -675,14 +679,18 @@ async def process_single_serial(app: Client, db, info: dict, loop):
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
-async def run_autonomous_scan(app: Client, db, loop):
+async def run_autonomous_scan(app: Client, db, loop, network_filter: str = None):
     print("\n🔍 [24/7 Auto-Scan] Checking TamilDhool for new episodes...")
     label, chans = get_current_rotation()
     today_dt = datetime.now(IST).date()
     all_episodes = []
     seen = set()
 
-    for net, cat_url in CATEGORY_PAGES:
+    pages = CATEGORY_PAGES
+    if network_filter and network_filter.upper() in ["SUN", "VIJAY", "ZEE"]:
+        pages = [p for p in CATEGORY_PAGES if p[0] == network_filter.upper()]
+
+    for net, cat_url in pages:
         try:
             r = requests.get(cat_url, headers=HTTP_HEADERS, impersonate="chrome110", timeout=15)
             if r.status_code != 200:
@@ -723,15 +731,29 @@ async def run_autonomous_scan(app: Client, db, loop):
         except Exception as e:
             print(f"Notice scanning {net}: {e}")
 
-    print(f"📊 Discovered {len(all_episodes)} total recent episodes across Sun, Vijay & Zee.")
-    
-    uploaded_count = 0
-    for ep in all_episodes:
-        ok = await process_single_serial(app, db, ep, loop)
-        if ok:
-            uploaded_count += 1
+    print(f"📊 Discovered {len(all_episodes)} total recent episodes across scanned categories.")
 
-    print(f"\n🎉 [Auto-Scan Completed] Uploaded {uploaded_count} episodes. Everything up-to-date!")
+    # Deduplicate against MongoDB to find only pending episodes
+    unprocessed = []
+    for ep in all_episodes:
+        existing = await db["cph_serials_processed"].find_one({"_id": ep["url"]})
+        if not existing:
+            unprocessed.append(ep)
+
+    if not unprocessed:
+        print("🎉 All serials are already published and up to date!")
+        return
+
+    print(f"⚡ Launching PARALLEL 10 BATCH ({len(unprocessed)} episodes to process, 10 running simultaneously)...")
+    sem = asyncio.Semaphore(10)
+
+    async def bounded_worker(ep_info):
+        async with sem:
+            return await process_single_serial(app, db, ep_info, loop)
+
+    results = await asyncio.gather(*[bounded_worker(ep) for ep in unprocessed], return_exceptions=True)
+    uploaded_count = sum(1 for r in results if r is True)
+    print(f"\n🎉 [Batch Completed] Successfully uploaded {uploaded_count}/{len(unprocessed)} episodes in parallel 10 batch!")
 
 async def main():
     single_info = parse_input_payload()
@@ -748,8 +770,9 @@ async def main():
             print("🚀 Executing Single Episode Upload (Dispatched from EC2/Manual)...")
             await process_single_serial(app, db, single_info, loop)
         else:
-            print("🤖 Executing Full Autonomous 24/7 Scan & Upload...")
-            await run_autonomous_scan(app, db, loop)
+            net_filter = os.getenv("MANUAL_NET")
+            print(f"🤖 Executing Parallel 10 Autonomous Scan & Upload (Filter: {net_filter or 'ALL'})...")
+            await run_autonomous_scan(app, db, loop, network_filter=net_filter)
     finally:
         await app.stop()
 
